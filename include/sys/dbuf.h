@@ -328,6 +328,13 @@ typedef struct dmu_buf_impl {
 	dmu_buf_user_t *db_user;
 } dmu_buf_impl_t;
 
+/*
+ * Assert that the provided dbuf can only be accessed by the caller, and by no
+ * other thread.  Either it must be locked, or in a state where locking is not
+ * required.
+ */
+void assert_db_data_locked(const dmu_buf_impl_t *db, boolean_t writer);
+
 #define	DBUF_HASH_MUTEX(h, idx) \
 	(&(h)->hash_mutexes[(idx) & ((h)->hash_mutex_mask)])
 
