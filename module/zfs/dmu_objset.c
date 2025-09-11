@@ -2235,7 +2235,7 @@ dmu_objset_userquota_get_ids(dnode_t *dn, boolean_t before, dmu_tx_t *tx)
 			ASSERT(error == 0);
 			mutex_enter(&db->db_mtx);
 			if (before) {
-				assert_db_data_locked(db, FALSE);
+				assert_db_data_contents_locked(db, FALSE);
 				data = db->db.db_data;
 			} else {
 				data = dmu_objset_userquota_find_data(db, tx);

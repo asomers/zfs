@@ -287,10 +287,18 @@ static uint_t dbuf_cache_hiwater_pct = 10;
 static uint_t dbuf_cache_lowater_pct = 10;
 
 void
-assert_db_data_locked(const dmu_buf_impl_t *db, boolean_t writer)
+assert_db_data_addr_locked(const dmu_buf_impl_t *db)
 {
-	/* TODO: check db_mtx*/
+	if (db->db_level > 0)
+		return;
+	else if (db->db.db_object == DMU_META_DNODE_OBJECT)
+		return;
+	ASSERT(MUTEX_HELD(&db->db_mtx));
+}
 
+void
+assert_db_data_contents_locked(const dmu_buf_impl_t *db, boolean_t writer)
+{
 	/* 
 	 * db_rwlock protects indirect blocks and the data block of the meta
 	 * dnode.
@@ -1228,16 +1236,18 @@ dbuf_verify(dmu_buf_impl_t *db)
 		 * to prevent hole birth times from being lost when you
 		 * partially fill in a hole.
 		 */
-		assert_db_data_locked(db, FALSE);
 		if (db->db_dirtycnt == 0) {
 			if (db->db_level == 0) {
-				uint64_t *buf = db->db.db_data;
+				uint64_t *buf;
 				int i;
 
+				assert_db_data_contents_locked(db, FALSE);
+				buf = db->db.db_data;
 				for (i = 0; i < db->db.db_size >> 3; i++) {
 					ASSERT(buf[i] == 0);
 				}
 			} else {
+				assert_db_data_contents_locked(db, FALSE);
 				blkptr_t *bps = db->db.db_data;
 				ASSERT3U(1 << DB_DNODE(db)->dn_indblkshift, ==,
 				    db->db.db_size);
@@ -1721,7 +1731,7 @@ dbuf_fix_old_data(dmu_buf_impl_t *db, uint64_t txg)
 		int bonuslen = DN_SLOTS_TO_BONUSLEN(dn->dn_num_slots);
 		dr->dt.dl.dr_data = kmem_alloc(bonuslen, KM_SLEEP);
 		arc_space_consume(bonuslen, ARC_SPACE_BONUS);
-		assert_db_data_locked(db, FALSE);
+		assert_db_data_contents_locked(db, FALSE);
 		memcpy(dr->dt.dl.dr_data, db->db.db_data, bonuslen);
 	} else if (zfs_refcount_count(&db->db_holds) > db->db_dirtycnt) {
 		dnode_t *dn = DB_DNODE(db);
@@ -1752,7 +1762,7 @@ dbuf_fix_old_data(dmu_buf_impl_t *db, uint64_t txg)
 		} else {
 			dr->dt.dl.dr_data = arc_alloc_buf(spa, db, type, size);
 		}
-		assert_db_data_locked(db, FALSE);
+		assert_db_data_contents_locked(db, FALSE);
 		memcpy(dr->dt.dl.dr_data->b_data, db->db.db_data, size);
 	} else {
 		db->db_buf = NULL;
@@ -3025,7 +3035,7 @@ dmu_buf_fill_done(dmu_buf_t *dbuf, dmu_tx_t *tx, boolean_t failed)
 			ASSERT(db->db_blkid != DMU_BONUS_BLKID);
 			/* we were freed while filling */
 			/* XXX dbuf_undirty? */
-			assert_db_data_locked(db, TRUE);
+			assert_db_data_contents_locked(db, TRUE);
 			memset(db->db.db_data, 0, db->db.db_size);
 			db->db_freed_in_flight = FALSE;
 			db->db_state = DB_CACHED;
@@ -3158,7 +3168,7 @@ dbuf_assign_arcbuf(dmu_buf_impl_t *db, arc_buf_t *buf, dmu_tx_t *tx,
 		ASSERT(!arc_is_encrypted(buf));
 		mutex_exit(&db->db_mtx);
 		(void) dbuf_dirty(db, tx);
-		assert_db_data_locked(db, TRUE);
+		assert_db_data_contents_locked(db, TRUE);
 		memcpy(db->db.db_data, buf->b_data, db->db.db_size);
 		arc_buf_destroy(buf, db);
 		return;
@@ -3402,10 +3412,9 @@ dbuf_findbp(dnode_t *dn, int level, uint64_t blkid, int fail_sparse,
 			*parentp = NULL;
 			return (err);
 		}
-		mutex_enter(&(*parentp)->db_mtx);
+		assert_db_data_addr_locked(*parentp);
 		*bpp = ((blkptr_t *)(*parentp)->db.db_data) +
 		    (blkid & ((1ULL << epbs) - 1));
-		mutex_exit(&(*parentp)->db_mtx);
 		return (0);
 	} else {
 		/* the block is referenced from the dnode */
@@ -4590,12 +4599,12 @@ dbuf_lightweight_bp(dbuf_dirty_record_t *dr)
 		return (&dn->dn_phys->dn_blkptr[dr->dt.dll.dr_blkid]);
 	} else {
 		dmu_buf_impl_t *parent_db = dr->dr_parent->dr_dbuf;
-		ASSERT(MUTEX_HELD(&parent_db->db_mtx));
+		assert_db_data_addr_locked(parent_db);
 		int epbs = dn->dn_indblkshift - SPA_BLKPTRSHIFT;
 		VERIFY3U(parent_db->db_level, ==, 1);
 		VERIFY3P(DB_DNODE(parent_db), ==, dn);
 		VERIFY3U(dr->dt.dll.dr_blkid >> epbs, ==, parent_db->db_blkid);
-		assert_db_data_locked(parent_db, FALSE);
+		assert_db_data_contents_locked(parent_db, FALSE);
 		blkptr_t *bp = parent_db->db.db_data;
 		return (&bp[dr->dt.dll.dr_blkid & ((1 << epbs) - 1)]);
 	}
@@ -4619,8 +4628,9 @@ dbuf_lightweight_ready(zio_t *zio)
 	} else {
 		parent_db = dr->dr_parent->dr_dbuf;
 	}
-	mutex_enter(&parent_db->db_mtx);
 
+	assert_db_data_addr_locked(parent_db);
+	// TODO: consider getting RW_WRITER here instead of upgrading later.
 	rw_enter(&parent_db->db_rwlock, RW_READER);
 	blkptr_t *bp_orig = dbuf_lightweight_bp(dr);
 	spa_t *spa = dmu_objset_spa(dn->dn_objset);
@@ -4647,7 +4657,6 @@ dbuf_lightweight_ready(zio_t *zio)
 	}
 	*bp_orig = *bp;
 	rw_exit(&parent_db->db_rwlock);
-	mutex_exit(&parent_db->db_mtx);
 }
 
 static void
@@ -4700,7 +4709,7 @@ dbuf_sync_lightweight(dbuf_dirty_record_t *dr, dmu_tx_t *tx)
 	 */
 	if (dr->dr_dnode->dn_phys->dn_nlevels != 1) {
 		parent_db = dr->dr_parent->dr_dbuf;
-		mutex_enter(&parent_db->db_mtx);
+		assert_db_data_addr_locked(parent_db);
 		rw_enter(&parent_db->db_rwlock, RW_READER);
 	}
 	dr->dr_bp_copy = *dbuf_lightweight_bp(dr);
@@ -4712,10 +4721,8 @@ dbuf_sync_lightweight(dbuf_dirty_record_t *dr, dmu_tx_t *tx)
 	    dbuf_lightweight_done, dr, ZIO_PRIORITY_ASYNC_WRITE,
 	    ZIO_FLAG_MUSTSUCCEED | dr->dt.dll.dr_flags, &zb);
 
-	if (parent_db) {
+	if (parent_db)
 		rw_exit(&parent_db->db_rwlock);
-		mutex_exit(&parent_db->db_mtx);
-	}
 
 	zio_nowait(dr->dr_zio);
 }
@@ -4873,7 +4880,7 @@ dbuf_sync_leaf(dbuf_dirty_record_t *dr, dmu_tx_t *tx)
 		} else {
 			*datap = arc_alloc_buf(os->os_spa, db, type, psize);
 		}
-		assert_db_data_locked(db, FALSE);
+		assert_db_data_contents_locked(db, FALSE);
 		memcpy((*datap)->b_data, db->db.db_data, psize);
 	}
 	db->db_data_pending = dr;
@@ -5060,7 +5067,7 @@ dbuf_write_children_ready(zio_t *zio, arc_buf_t *buf, void *vdb)
 	DB_DNODE_EXIT(db);
 	ASSERT3U(epbs, <, 31);
 
-	mutex_enter(&db->db_mtx);
+	assert_db_data_addr_locked(db);
 	rw_enter(&db->db_rwlock, RW_READER);
 	/* Determine if all our children are holes */
 	for (i = 0, bp = db->db.db_data; i < 1ULL << epbs; i++, bp++) {
@@ -5085,7 +5092,6 @@ dbuf_write_children_ready(zio_t *zio, arc_buf_t *buf, void *vdb)
 		memset(db->db.db_data, 0, db->db.db_size);
 	}
 	rw_exit(&db->db_rwlock);
-	mutex_exit(&db->db_mtx);
 }
 
 static void
@@ -5301,7 +5307,7 @@ dbuf_remap(dnode_t *dn, dmu_buf_impl_t *db, dmu_tx_t *tx)
 	if (!spa_feature_is_active(spa, SPA_FEATURE_DEVICE_REMOVAL))
 		return;
 
-	mutex_enter(&db->db_mtx);
+	assert_db_data_addr_locked(db);
 	rw_enter(&db->db_rwlock, RW_READER);
 	if (db->db_level > 0) {
 		blkptr_t *bp = db->db.db_data;
@@ -5322,7 +5328,6 @@ dbuf_remap(dnode_t *dn, dmu_buf_impl_t *db, dmu_tx_t *tx)
 		}
 	}
 	rw_exit(&db->db_rwlock);
-	mutex_exit(&db->db_mtx);
 }
 
 

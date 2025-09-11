@@ -329,11 +329,16 @@ typedef struct dmu_buf_impl {
 } dmu_buf_impl_t;
 
 /*
- * Assert that the provided dbuf can only be accessed by the caller, and by no
- * other thread.  Either it must be locked, or in a state where locking is not
- * required.
+ * Assert that the value of db.db_data cannot currently be changed.  Either
+ * it's locked, or it's in an immutable state.
  */
-void assert_db_data_locked(const dmu_buf_impl_t *db, boolean_t writer);
+void assert_db_data_addr_locked(const dmu_buf_impl_t *db);
+/*
+ * Assert that the provided dbuf's contents can only be accessed by the caller,
+ * and by no other thread.  Either it must be locked, or in a state where
+ * locking is not required.
+ */
+void assert_db_data_contents_locked(const dmu_buf_impl_t *db, boolean_t writer);
 
 #define	DBUF_HASH_MUTEX(h, idx) \
 	(&(h)->hash_mutexes[(idx) & ((h)->hash_mutex_mask)])
